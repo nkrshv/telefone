@@ -246,6 +246,7 @@ export class CallManager {
             data.close();
             return;
           }
+          if (this.data && this.data !== data) this.data.close();
           this.data = data;
           data.on('open', () => this.sendCameraState());
           data.on('data', (msg) => void this.onHostData(data, msg, cb));
@@ -397,6 +398,8 @@ export class CallManager {
       this.handshakeTimer = setTimeout(() => {
         if (this.authed) return;
         this.helloSeen = false;
+        this.pendingCall?.close();
+        this.pendingCall = null;
         data.close();
         if (this.data === data) this.data = null;
       }, HANDSHAKE_TIMEOUT_MS);
@@ -412,6 +415,8 @@ export class CallManager {
       if (!ok) {
         this.clearHandshakeTimer();
         this.helloSeen = false;
+        this.pendingCall?.close();
+        this.pendingCall = null;
         data.close();
         if (this.data === data) this.data = null;
         return;
@@ -652,7 +657,10 @@ export class CallManager {
     this.authed = false;
     this.helloSeen = false;
     this.roomLocked = false;
+    this.pendingCall?.close();
     this.pendingCall = null;
+    this.data?.close();
+    this.data = null;
     this.guestNonce = '';
     this.hostNonce = '';
     this.transcript = '';

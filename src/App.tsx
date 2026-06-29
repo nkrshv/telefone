@@ -324,6 +324,8 @@ function App() {
     setRemoteVideoOn(true);
     setQuality(0);
     setDuration(0);
+    setE2ee(null);
+    setSafety('');
     setStatus('waiting');
   }, []);
 
