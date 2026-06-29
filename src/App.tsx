@@ -39,7 +39,7 @@ function App() {
   const [micOn, setMicOn] = useState(true);
   const [camOn, setCamOn] = useState(true);
   const [safety, setSafety] = useState('');
-  const [e2ee, setE2ee] = useState(true);
+  const [e2ee, setE2ee] = useState<boolean | null>(null);
   const [hasRemote, setHasRemote] = useState(false);
 
   const managerRef = useRef<CallManager | null>(null);
@@ -56,6 +56,7 @@ function App() {
         setHasRemote(true);
         if (remoteVideoRef.current) remoteVideoRef.current.srcObject = stream;
       },
+      onE2EE: (active: boolean) => setE2ee(active),
       onError: (message: string) => setError(message),
     }),
     [],
@@ -65,12 +66,12 @@ function App() {
     async (role: 'host' | 'guest', r: RoomCode) => {
       setError('');
       setHasRemote(false);
+      setE2ee(null);
       setRoom(r);
       setScreen('call');
       setSafety(await computeSafetyCode(r.secret));
       const manager = new CallManager();
       managerRef.current = manager;
-      setE2ee(manager.e2eeActive);
       await manager.start(role, r, buildCallbacks());
     },
     [buildCallbacks],
@@ -207,10 +208,14 @@ function App() {
           )}
 
           <div className="status-strip">
-            <span className={`badge ${e2ee ? 'ok' : 'warn'}`}>
-              {e2ee
-                ? '🔒 E2EE: AES-256-GCM + DTLS-SRTP'
-                : '⚠ Только DTLS-SRTP (браузер без Insertable Streams)'}
+            <span
+              className={`badge ${e2ee === null ? 'pending' : e2ee ? 'ok' : 'warn'}`}
+            >
+              {e2ee === null
+                ? '🔐 Согласование шифрования…'
+                : e2ee
+                  ? '🔒 E2EE: AES-256-GCM + DTLS-SRTP'
+                  : '⚠ Только DTLS-SRTP (у собеседника нет Insertable Streams)'}
             </span>
             {safety && (
               <span className="safety" title="Сверьте этот код голосом с собеседником">
