@@ -15,10 +15,15 @@ export type CallStatus =
   | 'waiting'
   | 'connecting'
   | 'in-call'
+  | 'reconnecting'
+  | 'peer-left'
   | 'ended'
   | 'error';
 
 export type CallRole = 'host' | 'guest';
+
+/** Coarse link quality, 0 = unknown, 1 = poor … 4 = excellent. */
+export type QualityLevel = 0 | 1 | 2 | 3 | 4;
 
 export interface CallCallbacks {
   onStatus: (status: CallStatus, detail?: string) => void;
@@ -26,6 +31,10 @@ export interface CallCallbacks {
   onRemoteStream: (stream: MediaStream) => void;
   /** Fires once the extra E2EE layer is negotiated with the peer. */
   onE2EE: (active: boolean) => void;
+  /** Whether the remote peer is currently sending video (camera on). */
+  onRemoteVideo: (enabled: boolean) => void;
+  /** Periodic link-quality estimate derived from WebRTC stats. */
+  onQuality: (level: QualityLevel) => void;
   onError: (message: string) => void;
 }
 
@@ -66,6 +75,11 @@ export class CallManager {
   private callStarted = false;
   private readonly appliedSenders = new WeakSet<RTCRtpSender>();
   private readonly appliedReceivers = new WeakSet<RTCRtpReceiver>();
+  private statsTimer: ReturnType<typeof setInterval> | null = null;
+  private prevLost = 0;
+  private prevReceived = 0;
+  private closedByUs = false;
+  private peerGone = false;
 
   /** Whether this browser locally supports the extra E2EE layer. */
   get localE2EESupported(): boolean {
@@ -183,17 +197,110 @@ export class CallManager {
         this.applyReceiverTransform(event.receiver),
       );
       this.applySenderTransform(pc);
+      pc.addEventListener('connectionstatechange', () => {
+        switch (pc.connectionState) {
+          case 'connected':
+            cb.onStatus('in-call');
+            break;
+          case 'disconnected':
+            cb.onStatus('reconnecting');
+            break;
+          case 'failed':
+            this.reportPeerLeft(cb);
+            break;
+        }
+      });
     }
 
     call.on('stream', (remoteStream) => {
       cb.onRemoteStream(remoteStream);
       cb.onStatus('in-call');
+      this.watchRemoteVideo(remoteStream, cb);
+      this.startQualityMonitor(call, cb);
     });
-    call.on('close', () => cb.onStatus('ended'));
+    call.on('close', () => this.reportPeerLeft(cb));
     call.on('error', (err) => {
       cb.onStatus('error');
       cb.onError(err.message);
     });
+  }
+
+  /** Remote peer disconnected (not a local hangup). */
+  private reportPeerLeft(cb: CallCallbacks): void {
+    if (this.closedByUs || this.peerGone) return;
+    this.peerGone = true;
+    this.stopQualityMonitor();
+    cb.onStatus('peer-left');
+  }
+
+  /** Surface the remote camera on/off state by watching its video track. */
+  private watchRemoteVideo(stream: MediaStream, cb: CallCallbacks): void {
+    const track = stream.getVideoTracks()[0];
+    if (!track) {
+      cb.onRemoteVideo(false);
+      return;
+    }
+    const update = () => cb.onRemoteVideo(track.enabled && !track.muted);
+    update();
+    track.addEventListener('mute', update);
+    track.addEventListener('unmute', update);
+    track.addEventListener('ended', () => cb.onRemoteVideo(false));
+  }
+
+  private startQualityMonitor(call: MediaConnection, cb: CallCallbacks): void {
+    const pc = call.peerConnection;
+    if (!pc || this.statsTimer) return;
+    const sample = async () => {
+      try {
+        cb.onQuality(await this.sampleQuality(pc));
+      } catch {
+        cb.onQuality(0);
+      }
+    };
+    void sample();
+    this.statsTimer = setInterval(() => void sample(), 2000);
+  }
+
+  private stopQualityMonitor(): void {
+    if (this.statsTimer) {
+      clearInterval(this.statsTimer);
+      this.statsTimer = null;
+    }
+  }
+
+  private async sampleQuality(pc: RTCPeerConnection): Promise<QualityLevel> {
+    const stats = await pc.getStats();
+    let rtt: number | null = null;
+    let lost = 0;
+    let received = 0;
+    stats.forEach((report) => {
+      if (
+        report.type === 'candidate-pair' &&
+        (report as RTCIceCandidatePairStats).nominated &&
+        typeof (report as RTCIceCandidatePairStats).currentRoundTripTime ===
+          'number'
+      ) {
+        rtt = (report as RTCIceCandidatePairStats).currentRoundTripTime ?? null;
+      }
+      if (report.type === 'inbound-rtp' && (report as RTCInboundRtpStreamStats).kind === 'video') {
+        const r = report as RTCInboundRtpStreamStats;
+        lost += r.packetsLost ?? 0;
+        received += r.packetsReceived ?? 0;
+      }
+    });
+
+    const deltaLost = Math.max(0, lost - this.prevLost);
+    const deltaRecv = Math.max(0, received - this.prevReceived);
+    this.prevLost = lost;
+    this.prevReceived = received;
+    const loss = deltaRecv + deltaLost > 0 ? deltaLost / (deltaRecv + deltaLost) : 0;
+
+    if (received === 0 && rtt === null) return 0;
+    const rttMs = rtt === null ? 0 : rtt * 1000;
+    if (loss > 0.1 || rttMs > 500) return 1;
+    if (loss > 0.05 || rttMs > 300) return 2;
+    if (loss > 0.02 || rttMs > 150) return 3;
+    return 4;
   }
 
   // When Insertable Streams is enabled on the peer connection (this browser
@@ -243,6 +350,8 @@ export class CallManager {
   }
 
   hangup(): void {
+    this.closedByUs = true;
+    this.stopQualityMonitor();
     this.connection?.close();
     this.connection = null;
     this.data?.close();
