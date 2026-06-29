@@ -5,14 +5,22 @@ import {
   createDecryptTransform,
   createEncryptTransform,
   createIdentityTransform,
+  createPfsDecryptTransform,
+  createPfsEncryptTransform,
   deriveAuthKey,
+  deriveChainRoot,
+  deriveEcdhBits,
   deriveMediaKey,
+  generateEcdhKeyPair,
   randomNonce,
   signTranscript,
   supportsEncodedStreams,
   supportsScriptTransform,
+  supportsX25519,
   verifyTranscript,
+  type EcdhKeyPair,
 } from './crypto';
+import type { RTCEncodedFrame } from './insertable-streams';
 import { generatePeerId, type RoomCode } from './roomcode';
 
 export type CallStatus =
@@ -58,6 +66,8 @@ interface HelloMessage {
   t: 'hello';
   e2ee: boolean;
   nonce: string;
+  /** Ephemeral X25519 public key (base64), present iff this peer offers PFS. */
+  pub?: string;
 }
 
 interface AuthMessage {
@@ -65,6 +75,8 @@ interface AuthMessage {
   e2ee: boolean;
   nonce: string;
   mac: string;
+  /** Ephemeral X25519 public key (base64), present iff this peer offers PFS. */
+  pub?: string;
 }
 
 interface ConfirmMessage {
@@ -73,25 +85,33 @@ interface ConfirmMessage {
 }
 
 function isHelloMessage(msg: unknown): msg is HelloMessage {
-  const m = msg as { t?: unknown; e2ee?: unknown; nonce?: unknown };
+  const m = msg as { t?: unknown; e2ee?: unknown; nonce?: unknown; pub?: unknown };
   return (
     typeof msg === 'object' &&
     msg !== null &&
     m.t === 'hello' &&
     typeof m.e2ee === 'boolean' &&
-    typeof m.nonce === 'string'
+    typeof m.nonce === 'string' &&
+    (m.pub === undefined || typeof m.pub === 'string')
   );
 }
 
 function isAuthMessage(msg: unknown): msg is AuthMessage {
-  const m = msg as { t?: unknown; e2ee?: unknown; nonce?: unknown; mac?: unknown };
+  const m = msg as {
+    t?: unknown;
+    e2ee?: unknown;
+    nonce?: unknown;
+    mac?: unknown;
+    pub?: unknown;
+  };
   return (
     typeof msg === 'object' &&
     msg !== null &&
     m.t === 'auth' &&
     typeof m.e2ee === 'boolean' &&
     typeof m.nonce === 'string' &&
-    typeof m.mac === 'string'
+    typeof m.mac === 'string' &&
+    (m.pub === undefined || typeof m.pub === 'string')
   );
 }
 
@@ -105,19 +125,28 @@ function isConfirmMessage(msg: unknown): msg is ConfirmMessage {
   );
 }
 
-/** Canonical handshake transcript; both peers build the identical string. */
+/**
+ * Canonical handshake transcript; both peers build the identical string. The
+ * ephemeral X25519 public keys are bound in here so the HMAC (which only a peer
+ * holding the room secret can produce) also authenticates the ECDH exchange — a
+ * signaling MitM cannot substitute its own public key without breaking the MAC.
+ */
 function buildTranscript(
   guestNonce: string,
   hostNonce: string,
   e2eeGuest: boolean,
   e2eeHost: boolean,
+  pubGuest: string,
+  pubHost: string,
 ): string {
   return [
-    'telefone-handshake-v1',
+    'telefone-handshake-v2',
     guestNonce,
     hostNonce,
     String(e2eeGuest),
     String(e2eeHost),
+    pubGuest,
+    pubHost,
   ].join('|');
 }
 
@@ -167,6 +196,7 @@ export class CallManager {
   private mediaKey: CryptoKey | null = null;
   private authKey: CryptoKey | null = null;
   private secret = '';
+  private role: CallRole = 'guest';
   /** Chrome path: createEncodedStreams() on the main thread. */
   private readonly canEncodedStreams: boolean = supportsEncodedStreams();
   /** Safari path: RTCRtpScriptTransform driven by a worker. */
@@ -184,6 +214,19 @@ export class CallManager {
    * handshake transcript, so it remains downgrade-resistant (C1).
    */
   private readonly e2eeCapable: boolean = this.canEncodedStreams;
+  /**
+   * Perfect-forward-secrecy state (M1). Only the Chrome encoded-streams path
+   * runs it, and only if the browser exposes WebCrypto X25519; otherwise the
+   * call falls back to the static per-call media key (still AES-256-GCM).
+   */
+  private canX25519 = false;
+  private ephemeral: EcdhKeyPair | null = null;
+  private peerPub = '';
+  private pfsActive = false;
+  private sendRoots: { audio: Uint8Array<ArrayBuffer>; video: Uint8Array<ArrayBuffer> } | null =
+    null;
+  private recvRoots: { audio: Uint8Array<ArrayBuffer>; video: Uint8Array<ArrayBuffer> } | null =
+    null;
   /** Lazily-created worker that runs the Safari encoded-transform. */
   private transformWorker: Worker | null = null;
   /** Negotiated result: extra E2EE layer is used only if BOTH peers support it. */
@@ -223,8 +266,12 @@ export class CallManager {
     try {
       cb.onStatus('preparing');
       this.secret = room.secret;
+      this.role = role;
       this.mediaKey = await deriveMediaKey(room.secret);
       this.authKey = await deriveAuthKey(room.secret);
+      // Probe X25519 once; the PFS path is offered only when we can do both
+      // encoded streams and an ephemeral ECDH key agreement.
+      this.canX25519 = this.e2eeCapable && (await supportsX25519());
       this.localStream = await navigator.mediaDevices.getUserMedia({
         video: true,
         audio: true,
@@ -329,8 +376,18 @@ export class CallManager {
     };
 
     data.on('open', () => {
-      data.send({ t: 'hello', e2ee: this.e2eeCapable, nonce: this.guestNonce });
-      this.sendCameraState();
+      void (async () => {
+        if (this.canX25519 && !this.ephemeral) {
+          this.ephemeral = await generateEcdhKeyPair();
+        }
+        data.send({
+          t: 'hello',
+          e2ee: this.e2eeCapable,
+          nonce: this.guestNonce,
+          pub: this.ephemeral?.publicKeyB64,
+        });
+        this.sendCameraState();
+      })();
     });
     data.on('data', (msg) => {
       if (isCameraMessage(msg)) {
@@ -340,11 +397,14 @@ export class CallManager {
       if (this.authed || !isAuthMessage(msg)) return;
       void (async () => {
         this.hostNonce = msg.nonce;
+        this.peerPub = msg.pub ?? '';
         const transcript = buildTranscript(
           this.guestNonce,
           this.hostNonce,
           this.e2eeCapable,
           msg.e2ee,
+          this.ephemeral?.publicKeyB64 ?? '',
+          this.peerPub,
         );
         const ok = await verifyTranscript(
           this.authKey!,
@@ -365,6 +425,7 @@ export class CallManager {
         this.negotiated = true;
         this.clearHandshakeTimer();
         this.useE2EE = this.e2eeCapable && msg.e2ee;
+        await this.derivePfsRoots();
         startMedia();
       })();
     });
@@ -394,15 +455,27 @@ export class CallManager {
       this.helloSeen = true;
       this.guestNonce = msg.nonce;
       this.hostNonce = randomNonce();
+      this.peerPub = msg.pub ?? '';
+      if (this.canX25519 && !this.ephemeral) {
+        this.ephemeral = await generateEcdhKeyPair();
+      }
       this.transcript = buildTranscript(
         this.guestNonce,
         this.hostNonce,
         msg.e2ee,
         this.e2eeCapable,
+        this.peerPub,
+        this.ephemeral?.publicKeyB64 ?? '',
       );
       this.useE2EE = this.e2eeCapable && msg.e2ee;
       const mac = await signTranscript(this.authKey!, 'host', this.transcript);
-      data.send({ t: 'auth', e2ee: this.e2eeCapable, nonce: this.hostNonce, mac });
+      data.send({
+        t: 'auth',
+        e2ee: this.e2eeCapable,
+        nonce: this.hostNonce,
+        mac,
+        pub: this.ephemeral?.publicKeyB64,
+      });
       // If the guest never confirms, drop this half-open attempt so a genuine
       // peer can retry (an attacker without the secret can't get past here).
       this.handshakeTimer = setTimeout(() => {
@@ -434,6 +507,7 @@ export class CallManager {
       this.authed = true;
       this.negotiated = true;
       this.clearHandshakeTimer();
+      await this.derivePfsRoots();
       cb.onE2EE(this.useE2EE);
       if (this.pendingCall) {
         const call = this.pendingCall;
@@ -609,11 +683,9 @@ export class CallManager {
       if (!sender.track || this.appliedSenders.has(sender)) continue;
       if (this.canEncodedStreams && sender.createEncodedStreams) {
         const { readable, writable } = sender.createEncodedStreams();
-        const transform =
-          this.useE2EE && this.mediaKey
-            ? createEncryptTransform(this.mediaKey)
-            : createIdentityTransform();
-        void readable.pipeThrough(transform).pipeTo(writable);
+        void readable
+          .pipeThrough(this.encryptTransformFor(sender.track.kind))
+          .pipeTo(writable);
       } else if (this.canScriptTransform && this.useE2EE && this.mediaKey) {
         sender.transform = new RTCRtpScriptTransform(this.getTransformWorker(), {
           operation: 'encrypt',
@@ -628,11 +700,9 @@ export class CallManager {
     if (!this.localSupport || this.appliedReceivers.has(receiver)) return;
     if (this.canEncodedStreams && receiver.createEncodedStreams) {
       const { readable, writable } = receiver.createEncodedStreams();
-      const transform =
-        this.useE2EE && this.mediaKey
-          ? createDecryptTransform(this.mediaKey)
-          : createIdentityTransform();
-      void readable.pipeThrough(transform).pipeTo(writable);
+      void readable
+        .pipeThrough(this.decryptTransformFor(receiver.track.kind))
+        .pipeTo(writable);
     } else if (this.canScriptTransform && this.useE2EE && this.mediaKey) {
       receiver.transform = new RTCRtpScriptTransform(this.getTransformWorker(), {
         operation: 'decrypt',
@@ -640,6 +710,57 @@ export class CallManager {
       });
     }
     this.appliedReceivers.add(receiver);
+  }
+
+  /**
+   * Pick the outbound transform for a track: the ratcheting PFS layer when the
+   * ephemeral ECDH handshake succeeded, the static-key layer when E2EE is on
+   * but PFS is unavailable, or a pass-through (Chrome needs every encoded
+   * stream consumed even on the DTLS-only fallback).
+   */
+  private encryptTransformFor(
+    kind: string,
+  ): TransformStream<RTCEncodedFrame, RTCEncodedFrame> {
+    if (this.pfsActive && this.sendRoots && (kind === 'audio' || kind === 'video')) {
+      return createPfsEncryptTransform(this.sendRoots[kind]);
+    }
+    if (this.useE2EE && this.mediaKey) return createEncryptTransform(this.mediaKey);
+    return createIdentityTransform();
+  }
+
+  private decryptTransformFor(
+    kind: string,
+  ): TransformStream<RTCEncodedFrame, RTCEncodedFrame> {
+    if (this.pfsActive && this.recvRoots && (kind === 'audio' || kind === 'video')) {
+      return createPfsDecryptTransform(this.recvRoots[kind]);
+    }
+    if (this.useE2EE && this.mediaKey) return createDecryptTransform(this.mediaKey);
+    return createIdentityTransform();
+  }
+
+  /**
+   * After the authenticated handshake, mix the ephemeral ECDH secret with the
+   * room secret into per-direction, per-track chain roots (M1). Each direction
+   * and track kind gets an independent ratchet so the deterministic
+   * (epoch, counter) nonce can never repeat under one key (M2). No-op unless
+   * both peers offered a public key and the extra E2EE layer is on.
+   */
+  private async derivePfsRoots(): Promise<void> {
+    if (!this.useE2EE || !this.ephemeral || !this.peerPub) return;
+    const bits = await deriveEcdhBits(this.ephemeral.privateKey, this.peerPub);
+    const sendDir = this.role === 'guest' ? 'g2h' : 'h2g';
+    const recvDir = this.role === 'guest' ? 'h2g' : 'g2h';
+    const root = (dir: string, kind: string) =>
+      deriveChainRoot(bits, this.secret, `telefone-pfs|${dir}|${kind}|v1`);
+    this.sendRoots = {
+      audio: await root(sendDir, 'audio'),
+      video: await root(sendDir, 'video'),
+    };
+    this.recvRoots = {
+      audio: await root(recvDir, 'audio'),
+      video: await root(recvDir, 'video'),
+    };
+    this.pfsActive = true;
   }
 
   setMicEnabled(enabled: boolean): void {
@@ -674,6 +795,11 @@ export class CallManager {
     this.guestNonce = '';
     this.hostNonce = '';
     this.transcript = '';
+    this.peerPub = '';
+    this.ephemeral = null;
+    this.pfsActive = false;
+    this.sendRoots = null;
+    this.recvRoots = null;
     this.prevLost = 0;
     this.prevReceived = 0;
   }
