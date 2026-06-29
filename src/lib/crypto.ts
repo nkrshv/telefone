@@ -5,6 +5,21 @@ const enc = new TextEncoder();
 const IV_LENGTH = 12;
 const HKDF_SALT = enc.encode('telefone-e2ee-v1');
 const HKDF_INFO = enc.encode('telefone-media-key');
+const AUTH_SALT = enc.encode('telefone-auth-v1');
+const AUTH_INFO = enc.encode('telefone-handshake-key');
+
+function bytesToBase64(bytes: Uint8Array): string {
+  let binary = '';
+  for (const b of bytes) binary += String.fromCharCode(b);
+  return btoa(binary);
+}
+
+function base64ToBytes(b64: string): Uint8Array<ArrayBuffer> {
+  const binary = atob(b64);
+  const out = new Uint8Array(new ArrayBuffer(binary.length));
+  for (let i = 0; i < binary.length; i++) out[i] = binary.charCodeAt(i);
+  return out;
+}
 
 /**
  * Derives an AES-256-GCM key from the shared room secret.
@@ -29,14 +44,26 @@ export async function deriveMediaKey(secret: string): Promise<CryptoKey> {
 }
 
 /**
- * Short human-readable fingerprint of the shared secret. Both peers compute
- * the same value; reading it aloud lets users detect a man-in-the-middle.
+ * Short human-readable fingerprint shown to both peers for voice comparison.
+ *
+ * It binds the shared secret to BOTH ends' DTLS certificate fingerprints (read
+ * from the negotiated SDP). A signaling-layer man-in-the-middle that rewrites
+ * DTLS fingerprints — the classic attack against a malicious signaling relay,
+ * and the only app-layer protection on the DTLS-SRTP-only path (e.g. iPhone) —
+ * changes this code, so reading it aloud detects the MitM. The fingerprints are
+ * sorted so both peers compute the same value regardless of role.
  */
-export async function computeSafetyCode(secret: string): Promise<string> {
-  const digest = await crypto.subtle.digest(
-    'SHA-256',
-    enc.encode('telefone-safety:' + secret),
-  );
+export async function computeSafetyCode(
+  secret: string,
+  fingerprintA?: string | null,
+  fingerprintB?: string | null,
+): Promise<string> {
+  let input = 'telefone-safety:' + secret;
+  if (fingerprintA && fingerprintB) {
+    const [a, b] = [fingerprintA.toUpperCase(), fingerprintB.toUpperCase()].sort();
+    input += '|' + a + '|' + b;
+  }
+  const digest = await crypto.subtle.digest('SHA-256', enc.encode(input));
   const bytes = new Uint8Array(digest);
   const groups: string[] = [];
   for (let i = 0; i < 4; i++) {
@@ -44,6 +71,67 @@ export async function computeSafetyCode(secret: string): Promise<string> {
     groups.push(n.toString().padStart(5, '0'));
   }
   return groups.join(' ');
+}
+
+/**
+ * Derives an HMAC-SHA-256 key from the room secret, used to authenticate the
+ * data-channel handshake. Only a peer that knows the secret can produce a valid
+ * MAC, which is what gates admission and makes the negotiated E2EE flag
+ * tamper-evident (downgrade-resistant).
+ */
+export async function deriveAuthKey(secret: string): Promise<CryptoKey> {
+  const baseKey = await crypto.subtle.importKey(
+    'raw',
+    enc.encode(secret),
+    'HKDF',
+    false,
+    ['deriveKey'],
+  );
+  return crypto.subtle.deriveKey(
+    { name: 'HKDF', hash: 'SHA-256', salt: AUTH_SALT, info: AUTH_INFO },
+    baseKey,
+    { name: 'HMAC', hash: 'SHA-256', length: 256 },
+    false,
+    ['sign', 'verify'],
+  );
+}
+
+/** Random 128-bit nonce (base64) for the handshake transcript. */
+export function randomNonce(): string {
+  return bytesToBase64(crypto.getRandomValues(new Uint8Array(16)));
+}
+
+/** HMAC over a labelled handshake transcript; returns base64. */
+export async function signTranscript(
+  authKey: CryptoKey,
+  label: string,
+  transcript: string,
+): Promise<string> {
+  const mac = await crypto.subtle.sign(
+    'HMAC',
+    authKey,
+    enc.encode(label + '|' + transcript),
+  );
+  return bytesToBase64(new Uint8Array(mac));
+}
+
+/** Constant-time verification of a transcript MAC (via WebCrypto verify). */
+export async function verifyTranscript(
+  authKey: CryptoKey,
+  label: string,
+  transcript: string,
+  macB64: string,
+): Promise<boolean> {
+  try {
+    return await crypto.subtle.verify(
+      'HMAC',
+      authKey,
+      base64ToBytes(macB64),
+      enc.encode(label + '|' + transcript),
+    );
+  } catch {
+    return false;
+  }
 }
 
 /** TransformStream that encrypts each encoded media frame with AES-256-GCM. */
