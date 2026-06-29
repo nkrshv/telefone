@@ -183,6 +183,16 @@ function App() {
     history.replaceState(null, '', window.location.pathname);
   }, []);
 
+  const stayInCall = useCallback(() => {
+    managerRef.current?.resetForReconnect();
+    if (remoteVideoRef.current) remoteVideoRef.current.srcObject = null;
+    setHasRemote(false);
+    setRemoteVideoOn(true);
+    setQuality(0);
+    setDuration(0);
+    setStatus('waiting');
+  }, []);
+
   useEffect(() => {
     return () => managerRef.current?.hangup();
   }, []);
@@ -310,10 +320,7 @@ function App() {
                   Ссылка ещё работает — он может вернуться.
                 </p>
                 <div className="overlay-actions">
-                  <button
-                    className="ghost"
-                    onClick={() => setStatus('waiting')}
-                  >
+                  <button className="ghost" onClick={stayInCall}>
                     Остаться
                   </button>
                   <button className="primary danger-fill" onClick={endCall}>

@@ -389,6 +389,21 @@ export class CallManager {
     this.sendCameraState();
   }
 
+  /**
+   * Re-arm per-session state after a peer left and the user chose to stay, so a
+   * returning (or new) peer is detected and re-negotiates the E2EE layer.
+   */
+  resetForReconnect(): void {
+    this.stopQualityMonitor();
+    this.connection?.close();
+    this.connection = null;
+    this.peerGone = false;
+    this.negotiated = false;
+    this.callStarted = false;
+    this.prevLost = 0;
+    this.prevReceived = 0;
+  }
+
   hangup(): void {
     this.closedByUs = true;
     this.stopQualityMonitor();
