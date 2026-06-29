@@ -53,6 +53,25 @@ function isCapabilityMessage(msg: unknown): msg is CapabilityMessage {
   );
 }
 
+/**
+ * Camera on/off notice. Sent over the data channel because toggling
+ * `track.enabled` keeps the track "live" (it just sends black frames), so the
+ * receiver never gets a `mute` event — we have to tell the peer explicitly.
+ */
+interface CameraMessage {
+  t: 'cam';
+  on: boolean;
+}
+
+function isCameraMessage(msg: unknown): msg is CameraMessage {
+  return (
+    typeof msg === 'object' &&
+    msg !== null &&
+    (msg as { t?: unknown }).t === 'cam' &&
+    typeof (msg as { on?: unknown }).on === 'boolean'
+  );
+}
+
 /** Time to wait for the capability handshake before falling back to DTLS-SRTP. */
 const HANDSHAKE_TIMEOUT_MS = 4000;
 
@@ -80,6 +99,7 @@ export class CallManager {
   private prevReceived = 0;
   private closedByUs = false;
   private peerGone = false;
+  private cameraOn = true;
 
   /** Whether this browser locally supports the extra E2EE layer. */
   get localE2EESupported(): boolean {
@@ -120,7 +140,12 @@ export class CallManager {
         // so this is resolved before the media 'call' event arrives.
         this.peer.on('connection', (data) => {
           this.data = data;
+          data.on('open', () => this.sendCameraState());
           data.on('data', (msg) => {
+            if (isCameraMessage(msg)) {
+              cb.onRemoteVideo(msg.on);
+              return;
+            }
             if (this.negotiated || !isCapabilityMessage(msg)) return;
             this.negotiated = true;
             this.useE2EE = this.localSupport && msg.e2ee;
@@ -173,8 +198,15 @@ export class CallManager {
       startMedia();
     }, HANDSHAKE_TIMEOUT_MS);
 
-    data.on('open', () => data.send({ t: 'cap', e2ee: this.localSupport }));
+    data.on('open', () => {
+      data.send({ t: 'cap', e2ee: this.localSupport });
+      this.sendCameraState();
+    });
     data.on('data', (msg) => {
+      if (isCameraMessage(msg)) {
+        cb.onRemoteVideo(msg.on);
+        return;
+      }
       if (this.negotiated || !isCapabilityMessage(msg)) return;
       this.negotiated = true;
       clearTimeout(timer);
@@ -233,18 +265,24 @@ export class CallManager {
     cb.onStatus('peer-left');
   }
 
-  /** Surface the remote camera on/off state by watching its video track. */
+  /**
+   * Remote camera state is driven by explicit data-channel notices (see
+   * CameraMessage); here we only handle the track ending (peer really gone).
+   * We default to "on" until told otherwise.
+   */
   private watchRemoteVideo(stream: MediaStream, cb: CallCallbacks): void {
     const track = stream.getVideoTracks()[0];
-    if (!track) {
-      cb.onRemoteVideo(false);
-      return;
+    cb.onRemoteVideo(!!track);
+    track?.addEventListener('ended', () => cb.onRemoteVideo(false));
+  }
+
+  /** Tell the peer our current camera state (best-effort). */
+  private sendCameraState(): void {
+    try {
+      this.data?.send({ t: 'cam', on: this.cameraOn });
+    } catch {
+      /* data channel not ready — peer will get state on next toggle */
     }
-    const update = () => cb.onRemoteVideo(track.enabled && !track.muted);
-    update();
-    track.addEventListener('mute', update);
-    track.addEventListener('unmute', update);
-    track.addEventListener('ended', () => cb.onRemoteVideo(false));
   }
 
   private startQualityMonitor(call: MediaConnection, cb: CallCallbacks): void {
@@ -346,7 +384,9 @@ export class CallManager {
   }
 
   setCameraEnabled(enabled: boolean): void {
+    this.cameraOn = enabled;
     this.localStream?.getVideoTracks().forEach((t) => (t.enabled = enabled));
+    this.sendCameraState();
   }
 
   hangup(): void {
