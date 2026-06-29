@@ -10,18 +10,24 @@ import {
 } from './lib/roomcode';
 import {
   IconCheck,
+  IconChevron,
+  IconClose,
   IconCopy,
   IconLink,
+  IconLock,
   IconMic,
   IconMicOff,
   IconPhoneOff,
   IconShield,
+  IconSun,
+  IconTelegram,
   IconUser,
   IconVideo,
   IconVideoOff,
+  IconWhatsApp,
 } from './icons';
 
-type Screen = 'home' | 'join' | 'call';
+type Screen = 'home' | 'join' | 'call' | 'ended';
 
 function readSharedCode(): string {
   const hash = window.location.hash.slice(1);
@@ -98,6 +104,105 @@ function formatDuration(totalSeconds: number): string {
   return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
 }
 
+function SecurityModal({
+  e2ee,
+  safety,
+  onClose,
+}: {
+  e2ee: boolean | null;
+  safety: string;
+  onClose: () => void;
+}) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => e.key === 'Escape' && onClose();
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onClose]);
+
+  const layers = [
+    {
+      on: true,
+      title: 'Звонок идёт напрямую',
+      text: 'Видео и звук передаются между вашими устройствами, минуя наши серверы.',
+    },
+    {
+      on: true,
+      title: 'Базовое шифрование (DTLS-SRTP)',
+      text: 'Стандартная защита WebRTC — соединение зашифровано в пути.',
+    },
+    {
+      on: e2ee === true,
+      title: 'Сквозное шифрование (AES-256-GCM)',
+      text:
+        e2ee === true
+          ? 'Каждый кадр дополнительно шифруется ключом из вашей ссылки. Доступ есть только у вас двоих — даже у нас его нет.'
+          : e2ee === null
+            ? 'Договариваемся с собеседником…'
+            : 'Недоступно: у собеседника более старый браузер. Звонок всё равно зашифрован.',
+    },
+  ];
+
+  const heading =
+    e2ee === true
+      ? 'Звонок под сквозным шифрованием'
+      : e2ee === null
+        ? 'Защищаем соединение…'
+        : 'Звонок защищён';
+
+  return (
+    <div className="sec-backdrop" onClick={onClose}>
+      <div
+        className="sec-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-label="О защите звонка"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <button
+          className="sec-close"
+          onClick={onClose}
+          aria-label="Закрыть"
+          title="Закрыть"
+        >
+          <IconClose width={18} height={18} />
+        </button>
+        <div className={`sec-hero ${e2ee ? 'ok' : e2ee === null ? 'pending' : 'warn'}`}>
+          <IconLock width={26} height={26} />
+        </div>
+        <h2 className="sec-title">{heading}</h2>
+        <p className="sec-sub">
+          Мы не видим и не храним ваши звонки. Вот что защищает этот разговор:
+        </p>
+
+        <ul className="sec-layers">
+          {layers.map((l) => (
+            <li key={l.title} className={l.on ? 'on' : 'off'}>
+              <span className="sec-dot">
+                {l.on ? <IconCheck width={14} height={14} /> : null}
+              </span>
+              <div>
+                <strong>{l.title}</strong>
+                <span>{l.text}</span>
+              </div>
+            </li>
+          ))}
+        </ul>
+
+        {safety && (
+          <div className="sec-safety">
+            <p className="sec-safety-label">Код безопасности</p>
+            <p className="sec-safety-code">{safety}</p>
+            <p className="sec-safety-hint">
+              Назовите эти числа собеседнику вслух. Если они совпали — на линии
+              точно только вы двое, и никто не подменил соединение.
+            </p>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function App() {
   const sharedCode = readSharedCode();
   const [screen, setScreen] = useState<Screen>(sharedCode ? 'join' : 'home');
@@ -114,11 +219,15 @@ function App() {
   const [remoteVideoOn, setRemoteVideoOn] = useState(true);
   const [quality, setQuality] = useState<QualityLevel>(0);
   const [duration, setDuration] = useState(0);
+  const [endedDuration, setEndedDuration] = useState(0);
+  const [glow, setGlow] = useState(true);
+  const [securityOpen, setSecurityOpen] = useState(false);
   const badge = securityBadge(e2ee);
 
   const managerRef = useRef<CallManager | null>(null);
   const localVideoRef = useRef<HTMLVideoElement>(null);
   const remoteVideoRef = useRef<HTMLVideoElement>(null);
+  const glowVideoRef = useRef<HTMLVideoElement>(null);
 
   const buildCallbacks = useCallback(
     () => ({
@@ -129,6 +238,7 @@ function App() {
       onRemoteStream: (stream: MediaStream) => {
         setHasRemote(true);
         if (remoteVideoRef.current) remoteVideoRef.current.srcObject = stream;
+        if (glowVideoRef.current) glowVideoRef.current.srcObject = stream;
       },
       onE2EE: (active: boolean) => setE2ee(active),
       onRemoteVideo: (enabled: boolean) => setRemoteVideoOn(enabled),
@@ -146,6 +256,7 @@ function App() {
       setQuality(0);
       setDuration(0);
       setE2ee(null);
+      setSecurityOpen(false);
       setRoom(r);
       setScreen('call');
       setSafety(await computeSafetyCode(r.secret));
@@ -169,19 +280,37 @@ function App() {
     void beginCall('guest', parsed);
   }, [beginCall, joinInput]);
 
-  const endCall = useCallback(() => {
+  const teardownCall = useCallback(() => {
     managerRef.current?.hangup();
     managerRef.current = null;
     if (remoteVideoRef.current) remoteVideoRef.current.srcObject = null;
+    if (glowVideoRef.current) glowVideoRef.current.srcObject = null;
     if (localVideoRef.current) localVideoRef.current.srcObject = null;
-    setRoom(null);
-    setStatus('idle');
-    setScreen('home');
     setMicOn(true);
     setCamOn(true);
     setHasRemote(false);
+    setSecurityOpen(false);
     history.replaceState(null, '', window.location.pathname);
   }, []);
+
+  // End the call but land on a post-call screen instead of jumping home.
+  const endCall = useCallback(() => {
+    setEndedDuration(duration);
+    teardownCall();
+    setStatus('ended');
+    setScreen('ended');
+  }, [duration, teardownCall]);
+
+  const goHome = useCallback(() => {
+    teardownCall();
+    setRoom(null);
+    setStatus('idle');
+    setScreen('home');
+  }, [teardownCall]);
+
+  const callAgain = useCallback(() => {
+    void beginCall('host', createRoomCode());
+  }, [beginCall]);
 
   const stayInCall = useCallback(() => {
     managerRef.current?.resetForReconnect();
@@ -219,12 +348,22 @@ function App() {
   const shareLink = room
     ? `${window.location.origin}${window.location.pathname}#${encodeRoomCode(room)}`
     : '';
+  const shareText = 'Давай созвонимся в telefone — это личный и зашифрованный звонок';
 
   const copyCode = async () => {
     if (!shareLink) return;
     await navigator.clipboard.writeText(shareLink);
     setCopied(true);
     setTimeout(() => setCopied(false), 1500);
+  };
+
+  const shareVia = (app: 'whatsapp' | 'telegram') => {
+    if (!shareLink) return;
+    const url =
+      app === 'whatsapp'
+        ? `https://wa.me/?text=${encodeURIComponent(`${shareText}: ${shareLink}`)}`
+        : `https://t.me/share/url?url=${encodeURIComponent(shareLink)}&text=${encodeURIComponent(shareText)}`;
+    window.open(url, '_blank', 'noopener,noreferrer');
   };
 
   const peerLeft = status === 'peer-left';
@@ -279,6 +418,15 @@ function App() {
 
       {screen === 'call' && (
         <main className="call">
+          <div className={`stage-wrap ${glow && hasRemote ? 'glow-on' : ''}`}>
+          <video
+            ref={glowVideoRef}
+            className="stage-glow"
+            autoPlay
+            playsInline
+            muted
+            aria-hidden="true"
+          />
           <div className="video-stage">
             <video
               ref={remoteVideoRef}
@@ -357,6 +505,7 @@ function App() {
               )}
             </div>
           </div>
+          </div>
 
           {!hasRemote && room && !peerLeft && (
             <div className="invite">
@@ -365,37 +514,62 @@ function App() {
                 Поделитесь ссылкой с собеседником
               </p>
               <code className="room-code">{encodeRoomCode(room)}</code>
-              <button className="copy" onClick={copyCode}>
-                {copied ? (
-                  <>
-                    <IconCheck width={17} height={17} /> Скопировано
-                  </>
-                ) : (
-                  <>
-                    <IconCopy width={17} height={17} /> Копировать ссылку
-                  </>
-                )}
-              </button>
+              <div className="invite-actions">
+                <button className="copy" onClick={copyCode}>
+                  {copied ? (
+                    <>
+                      <IconCheck width={17} height={17} /> Скопировано
+                    </>
+                  ) : (
+                    <>
+                      <IconCopy width={17} height={17} /> Копировать ссылку
+                    </>
+                  )}
+                </button>
+                <button
+                  className="share wa"
+                  onClick={() => shareVia('whatsapp')}
+                  title="Отправить в WhatsApp"
+                  aria-label="Отправить ссылку в WhatsApp"
+                >
+                  <IconWhatsApp width={18} height={18} />
+                </button>
+                <button
+                  className="share tg"
+                  onClick={() => shareVia('telegram')}
+                  title="Отправить в Telegram"
+                  aria-label="Отправить ссылку в Telegram"
+                >
+                  <IconTelegram width={18} height={18} />
+                </button>
+              </div>
             </div>
           )}
 
           <div className="status-strip">
-            <span className={`badge ${badge.cls}`} title={badge.title}>
+            <button
+              className={`badge ${badge.cls}`}
+              onClick={() => setSecurityOpen(true)}
+              title="Подробнее о защите звонка"
+              aria-label="Подробнее о защите звонка"
+            >
               <IconShield className="badge-icon" width={16} height={16} />
               {badge.label}
-            </span>
+              <IconChevron className="badge-more" width={15} height={15} />
+            </button>
             <div className="status-right">
               {hasRemote && status === 'in-call' && (
                 <QualityBars level={quality} />
               )}
               {safety && (
-                <span
+                <button
                   className="safety"
+                  onClick={() => setSecurityOpen(true)}
                   title="Назовите эти числа друг другу. Совпали — значит, на линии только вы двое."
                 >
                   <span className="safety-label">Код безопасности</span>{' '}
                   <strong>{safety}</strong>
-                </span>
+                </button>
               )}
             </div>
           </div>
@@ -420,6 +594,15 @@ function App() {
               {camOn ? <IconVideo /> : <IconVideoOff />}
             </button>
             <button
+              className={`ctrl ${glow ? 'active' : ''}`}
+              onClick={() => setGlow((g) => !g)}
+              title={glow ? 'Выключить подсветку' : 'Включить подсветку'}
+              aria-label={glow ? 'Выключить подсветку' : 'Включить подсветку'}
+              aria-pressed={glow}
+            >
+              <IconSun />
+            </button>
+            <button
               className="ctrl hangup"
               onClick={endCall}
               title="Завершить звонок"
@@ -428,6 +611,35 @@ function App() {
               <IconPhoneOff />
             </button>
           </div>
+
+          {securityOpen && (
+            <SecurityModal
+              e2ee={e2ee}
+              safety={safety}
+              onClose={() => setSecurityOpen(false)}
+            />
+          )}
+        </main>
+      )}
+
+      {screen === 'ended' && (
+        <main className="card">
+          <div className="ended-icon">
+            <IconPhoneOff width={26} height={26} />
+          </div>
+          <h1>Звонок завершён</h1>
+          <p className="sub">
+            {endedDuration > 0
+              ? `Длительность звонка — ${formatDuration(endedDuration)}.`
+              : 'Звонок завершён.'}{' '}
+            Спасибо, что были на связи.
+          </p>
+          <button className="primary" onClick={callAgain}>
+            Начать новый звонок
+          </button>
+          <button className="ghost" onClick={goHome}>
+            На главную
+          </button>
         </main>
       )}
 
