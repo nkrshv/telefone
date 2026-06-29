@@ -109,10 +109,20 @@ export function createIdentityTransform(): TransformStream<
   });
 }
 
-/** True when the browser supports the extra E2EE layer (Insertable Streams). */
-export function isInsertableStreamsSupported(): boolean {
+/** Chrome/Edge flavour: RTCRtpSender.createEncodedStreams() on the main thread. */
+export function supportsEncodedStreams(): boolean {
   return (
     typeof RTCRtpSender !== 'undefined' &&
     'createEncodedStreams' in RTCRtpSender.prototype
   );
+}
+
+/** Safari/standard flavour: RTCRtpScriptTransform (work runs in a worker). */
+export function supportsScriptTransform(): boolean {
+  return typeof RTCRtpScriptTransform !== 'undefined';
+}
+
+/** True when the browser supports the extra E2EE layer in either flavour. */
+export function isInsertableStreamsSupported(): boolean {
+  return supportsEncodedStreams() || supportsScriptTransform();
 }
