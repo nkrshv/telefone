@@ -28,7 +28,11 @@ export function encodeRoomCode({ peerId, secret }: RoomCode): string {
 }
 
 export function parseRoomCode(raw: string): RoomCode | null {
-  const trimmed = raw.trim();
+  let trimmed = raw.trim();
+  // Accept a full invite link (…/#tf-id.secret), not only the bare code:
+  // the secret lives after the URL fragment, so drop everything up to '#'.
+  const hashIdx = trimmed.lastIndexOf('#');
+  if (hashIdx !== -1) trimmed = trimmed.slice(hashIdx + 1);
   const idx = trimmed.indexOf(SEPARATOR);
   if (idx <= 0 || idx === trimmed.length - 1) return null;
   const peerId = trimmed.slice(0, idx);
