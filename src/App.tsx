@@ -20,13 +20,40 @@ function readSharedCode(): string {
 
 const STATUS_LABEL: Record<CallStatus, string> = {
   idle: '',
-  preparing: 'Запрашиваем камеру и микрофон…',
-  waiting: 'Ожидаем собеседника…',
-  connecting: 'Подключаемся…',
-  'in-call': 'Зашифрованный звонок',
+  preparing: 'Включаем камеру и микрофон…',
+  waiting: 'Ждём собеседника…',
+  connecting: 'Соединяем…',
+  'in-call': 'На связи',
   ended: 'Звонок завершён',
-  error: 'Ошибка',
+  error: 'Что-то пошло не так',
 };
+
+function securityBadge(e2ee: boolean | null): {
+  cls: string;
+  label: string;
+  title: string;
+} {
+  if (e2ee === null) {
+    return {
+      cls: 'pending',
+      label: 'Защищаем соединение…',
+      title: 'Договариваемся о шифровании с собеседником.',
+    };
+  }
+  if (e2ee) {
+    return {
+      cls: 'ok',
+      label: '🔒 Сквозное шифрование',
+      title: 'Звонок видите только вы двое — даже мы не имеем к нему доступа.',
+    };
+  }
+  return {
+    cls: 'warn',
+    label: '🔒 Соединение защищено',
+    title:
+      'Звонок зашифрован. Самый сильный (сквозной) режим недоступен — у собеседника старый браузер.',
+  };
+}
 
 function App() {
   const sharedCode = readSharedCode();
@@ -41,6 +68,7 @@ function App() {
   const [safety, setSafety] = useState('');
   const [e2ee, setE2ee] = useState<boolean | null>(null);
   const [hasRemote, setHasRemote] = useState(false);
+  const badge = securityBadge(e2ee);
 
   const managerRef = useRef<CallManager | null>(null);
   const localVideoRef = useRef<HTMLVideoElement>(null);
@@ -84,7 +112,7 @@ function App() {
   const handleJoin = useCallback(() => {
     const parsed = parseRoomCode(joinInput);
     if (!parsed) {
-      setError('Неверный код комнаты.');
+      setError('Похоже, ссылка или код неверные.');
       return;
     }
     void beginCall('guest', parsed);
@@ -134,37 +162,38 @@ function App() {
     <div className="app">
       <header className="topbar">
         <span className="logo">telefone</span>
-        <span className="tagline">защищённые P2P-звонки</span>
+        <span className="tagline">личные видеозвонки</span>
       </header>
 
       {screen === 'home' && (
         <main className="card">
-          <h1>Защищённый видеозвонок</h1>
+          <h1>Звонки, которые видите только вы</h1>
           <p className="sub">
-            Сквозное шифрование. Видео идёт напрямую между вами, минуя сервер.
+            Видео идёт напрямую между вами. Никто не подключится без
+            вашей ссылки.
           </p>
           <button className="primary" onClick={handleHost}>
-            Создать звонок
+            Начать звонок
           </button>
           <button className="ghost" onClick={() => setScreen('join')}>
-            Подключиться по коду
+            У меня есть ссылка
           </button>
         </main>
       )}
 
       {screen === 'join' && (
         <main className="card">
-          <h1>Подключиться</h1>
-          <p className="sub">Вставьте код комнаты или ссылку от собеседника.</p>
+          <h1>Присоединиться</h1>
+          <p className="sub">Вставьте ссылку или код, которые прислал собеседник.</p>
           <input
             className="code-input"
-            placeholder="Код комнаты…"
+            placeholder="Ссылка или код"
             value={joinInput}
             onChange={(e) => setJoinInput(e.target.value)}
           />
           {error && <p className="error">{error}</p>}
           <button className="primary" onClick={handleJoin}>
-            Войти в звонок
+            Присоединиться
           </button>
           <button className="ghost" onClick={() => setScreen('home')}>
             Назад
@@ -199,7 +228,7 @@ function App() {
 
           {!hasRemote && room && (
             <div className="invite">
-              <p className="invite-label">Отправьте этот код собеседнику:</p>
+              <p className="invite-label">Поделитесь ссылкой с собеседником</p>
               <code className="room-code">{encodeRoomCode(room)}</code>
               <button className="copy" onClick={copyCode}>
                 {copied ? 'Скопировано' : 'Копировать ссылку'}
@@ -208,18 +237,17 @@ function App() {
           )}
 
           <div className="status-strip">
-            <span
-              className={`badge ${e2ee === null ? 'pending' : e2ee ? 'ok' : 'warn'}`}
-            >
-              {e2ee === null
-                ? '🔐 Согласование шифрования…'
-                : e2ee
-                  ? '🔒 E2EE: AES-256-GCM + DTLS-SRTP'
-                  : '⚠ Только DTLS-SRTP (у собеседника нет Insertable Streams)'}
+            <span className={`badge ${badge.cls}`} title={badge.title}>
+              <span className="badge-dot" />
+              {badge.label}
             </span>
             {safety && (
-              <span className="safety" title="Сверьте этот код голосом с собеседником">
-                Код безопасности: <strong>{safety}</strong>
+              <span
+                className="safety"
+                title="Назовите эти числа друг другу. Совпали — значит, на линии только вы двое."
+              >
+                <span className="safety-label">Код безопасности</span>{' '}
+                <strong>{safety}</strong>
               </span>
             )}
           </div>
@@ -245,8 +273,8 @@ function App() {
       )}
 
       <footer className="footer">
-        Сигналинг-сервер не видит ключи шифрования. Код безопасности защищает от
-        подмены.
+        Мы не видим и не храним ваши звонки — видео идёт напрямую между
+        устройствами.
       </footer>
     </div>
   );

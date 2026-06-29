@@ -256,15 +256,15 @@ export class CallManager {
   private describeError(type: string, fallback: string): string {
     switch (type) {
       case 'peer-unavailable':
-        return 'Собеседник недоступен — проверьте код комнаты или дождитесь, пока он создаст звонок.';
+        return 'Собеседник пока не в сети. Проверьте ссылку или подождите, пока он откроет звонок.';
       case 'unavailable-id':
-        return 'Этот код комнаты уже занят. Создайте новый звонок.';
+        return 'Эта ссылка уже используется. Начните новый звонок.';
       case 'browser-incompatible':
-        return 'Браузер не поддерживает WebRTC.';
+        return 'Этот браузер не поддерживает звонки. Попробуйте Chrome или Safari.';
       case 'network':
-        return 'Проблема с сетью при подключении к сигналинг-серверу.';
+        return 'Проблемы с сетью. Проверьте интернет-соединение.';
       default:
-        return fallback || 'Произошла ошибка соединения.';
+        return fallback || 'Не удалось соединиться. Попробуйте ещё раз.';
     }
   }
 }
