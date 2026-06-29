@@ -92,6 +92,23 @@ export function createDecryptTransform(
   });
 }
 
+/**
+ * Pass-through transform. Required when Insertable Streams is enabled on the
+ * RTCPeerConnection but the extra E2EE layer is disabled (fallback): Chrome
+ * blocks media unless the encoded streams are consumed, so we forward frames
+ * unchanged instead of leaving them unpiped.
+ */
+export function createIdentityTransform(): TransformStream<
+  RTCEncodedFrame,
+  RTCEncodedFrame
+> {
+  return new TransformStream({
+    transform(frame, controller) {
+      controller.enqueue(frame);
+    },
+  });
+}
+
 /** True when the browser supports the extra E2EE layer (Insertable Streams). */
 export function isInsertableStreamsSupported(): boolean {
   return (

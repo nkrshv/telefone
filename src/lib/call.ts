@@ -3,6 +3,7 @@ import type { DataConnection, MediaConnection } from 'peerjs';
 import {
   createDecryptTransform,
   createEncryptTransform,
+  createIdentityTransform,
   deriveMediaKey,
   isInsertableStreamsSupported,
 } from './crypto';
@@ -179,9 +180,9 @@ export class CallManager {
     const pc = call.peerConnection;
     if (pc) {
       pc.addEventListener('track', (event) =>
-        this.applyReceiverE2EE(event.receiver),
+        this.applyReceiverTransform(event.receiver),
       );
-      this.applySenderE2EE(pc);
+      this.applySenderTransform(pc);
     }
 
     call.on('stream', (remoteStream) => {
@@ -195,8 +196,12 @@ export class CallManager {
     });
   }
 
-  private applySenderE2EE(pc: RTCPeerConnection): void {
-    if (!this.useE2EE || !this.mediaKey) return;
+  // When Insertable Streams is enabled on the peer connection (this browser
+  // supports it), every sender/receiver MUST consume its encoded streams or
+  // Chrome blocks the media. We encrypt/decrypt when the E2EE layer was
+  // negotiated, otherwise we forward frames unchanged (DTLS-SRTP fallback).
+  private applySenderTransform(pc: RTCPeerConnection): void {
+    if (!this.localSupport) return;
     for (const sender of pc.getSenders()) {
       if (
         !sender.track ||
@@ -206,22 +211,26 @@ export class CallManager {
         continue;
       }
       const { readable, writable } = sender.createEncodedStreams();
-      void readable
-        .pipeThrough(createEncryptTransform(this.mediaKey))
-        .pipeTo(writable);
+      const transform =
+        this.useE2EE && this.mediaKey
+          ? createEncryptTransform(this.mediaKey)
+          : createIdentityTransform();
+      void readable.pipeThrough(transform).pipeTo(writable);
       this.appliedSenders.add(sender);
     }
   }
 
-  private applyReceiverE2EE(receiver: RTCRtpReceiver): void {
-    if (!this.useE2EE || !this.mediaKey) return;
+  private applyReceiverTransform(receiver: RTCRtpReceiver): void {
+    if (!this.localSupport) return;
     if (!receiver.createEncodedStreams || this.appliedReceivers.has(receiver)) {
       return;
     }
     const { readable, writable } = receiver.createEncodedStreams();
-    void readable
-      .pipeThrough(createDecryptTransform(this.mediaKey))
-      .pipeTo(writable);
+    const transform =
+      this.useE2EE && this.mediaKey
+        ? createDecryptTransform(this.mediaKey)
+        : createIdentityTransform();
+    void readable.pipeThrough(transform).pipeTo(writable);
     this.appliedReceivers.add(receiver);
   }
 
