@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import './App.css';
 import { CallManager, type CallStatus, type QualityLevel } from './lib/call';
-import { computeSafetyCode } from './lib/crypto';
 import {
   createRoomCode,
   encodeRoomCode,
@@ -187,16 +186,22 @@ function SecurityModal({
           ))}
         </ul>
 
-        {safety && (
-          <div className="sec-safety">
-            <p className="sec-safety-label">Код безопасности</p>
-            <p className="sec-safety-code">{safety}</p>
+        <div className="sec-safety">
+          <p className="sec-safety-label">Код безопасности</p>
+          {safety ? (
+            <>
+              <p className="sec-safety-code">{safety}</p>
+              <p className="sec-safety-hint">
+                Назовите эти числа собеседнику вслух. Если они совпали — на линии
+                точно только вы двое, и никто не подменил соединение.
+              </p>
+            </>
+          ) : (
             <p className="sec-safety-hint">
-              Назовите эти числа собеседнику вслух. Если они совпали — на линии
-              точно только вы двое, и никто не подменил соединение.
+              Появится после соединения — он привязан к этому звонку.
             </p>
-          </div>
-        )}
+          )}
+        </div>
       </div>
     </div>
   );
@@ -242,6 +247,7 @@ function App() {
       onE2EE: (active: boolean) => setE2ee(active),
       onRemoteVideo: (enabled: boolean) => setRemoteVideoOn(enabled),
       onQuality: (level: QualityLevel) => setQuality(level),
+      onSafetyCode: (code: string) => setSafety(code),
       onError: (message: string) => setError(message),
     }),
     [],
@@ -258,7 +264,7 @@ function App() {
       setSecurityOpen(false);
       setRoom(r);
       setScreen('call');
-      setSafety(await computeSafetyCode(r.secret));
+      setSafety('');
       const manager = new CallManager();
       managerRef.current = manager;
       await manager.start(role, r, buildCallbacks());
@@ -318,6 +324,8 @@ function App() {
     setRemoteVideoOn(true);
     setQuality(0);
     setDuration(0);
+    setE2ee(null);
+    setSafety('');
     setStatus('waiting');
   }, []);
 
