@@ -174,6 +174,16 @@ export class CallManager {
   /** Whether THIS browser can do frame-level encryption in either flavour. */
   private readonly localSupport: boolean =
     this.canEncodedStreams || this.canScriptTransform;
+  /**
+   * Capability we ADVERTISE for the extra E2EE layer. Only the Chrome
+   * createEncodedStreams path is verified to interoperate frame-for-frame; the
+   * Safari RTCRtpScriptTransform worker path is not yet validated cross-browser
+   * (it silently fails to decrypt, blanking the remote video), so we do not
+   * negotiate the extra layer for it — those calls stay on DTLS-SRTP, which is
+   * already end-to-end for direct P2P. The flag still rides inside the signed
+   * handshake transcript, so it remains downgrade-resistant (C1).
+   */
+  private readonly e2eeCapable: boolean = this.canEncodedStreams;
   /** Lazily-created worker that runs the Safari encoded-transform. */
   private transformWorker: Worker | null = null;
   /** Negotiated result: extra E2EE layer is used only if BOTH peers support it. */
@@ -319,7 +329,7 @@ export class CallManager {
     };
 
     data.on('open', () => {
-      data.send({ t: 'hello', e2ee: this.localSupport, nonce: this.guestNonce });
+      data.send({ t: 'hello', e2ee: this.e2eeCapable, nonce: this.guestNonce });
       this.sendCameraState();
     });
     data.on('data', (msg) => {
@@ -333,7 +343,7 @@ export class CallManager {
         const transcript = buildTranscript(
           this.guestNonce,
           this.hostNonce,
-          this.localSupport,
+          this.e2eeCapable,
           msg.e2ee,
         );
         const ok = await verifyTranscript(
@@ -354,7 +364,7 @@ export class CallManager {
         this.authed = true;
         this.negotiated = true;
         this.clearHandshakeTimer();
-        this.useE2EE = this.localSupport && msg.e2ee;
+        this.useE2EE = this.e2eeCapable && msg.e2ee;
         startMedia();
       })();
     });
@@ -388,11 +398,11 @@ export class CallManager {
         this.guestNonce,
         this.hostNonce,
         msg.e2ee,
-        this.localSupport,
+        this.e2eeCapable,
       );
-      this.useE2EE = this.localSupport && msg.e2ee;
+      this.useE2EE = this.e2eeCapable && msg.e2ee;
       const mac = await signTranscript(this.authKey!, 'host', this.transcript);
-      data.send({ t: 'auth', e2ee: this.localSupport, nonce: this.hostNonce, mac });
+      data.send({ t: 'auth', e2ee: this.e2eeCapable, nonce: this.hostNonce, mac });
       // If the guest never confirms, drop this half-open attempt so a genuine
       // peer can retry (an attacker without the secret can't get past here).
       this.handshakeTimer = setTimeout(() => {
