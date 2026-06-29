@@ -10,7 +10,6 @@ import {
 } from './lib/roomcode';
 import {
   IconCheck,
-  IconChevron,
   IconClose,
   IconCopy,
   IconLink,
@@ -357,14 +356,12 @@ function App() {
     setTimeout(() => setCopied(false), 1500);
   };
 
-  const shareVia = (app: 'whatsapp' | 'telegram') => {
-    if (!shareLink) return;
-    const url =
-      app === 'whatsapp'
-        ? `https://wa.me/?text=${encodeURIComponent(`${shareText}: ${shareLink}`)}`
-        : `https://t.me/share/url?url=${encodeURIComponent(shareLink)}&text=${encodeURIComponent(shareText)}`;
-    window.open(url, '_blank', 'noopener,noreferrer');
-  };
+  const whatsappHref = shareLink
+    ? `https://wa.me/?text=${encodeURIComponent(`${shareText}: ${shareLink}`)}`
+    : '';
+  const telegramHref = shareLink
+    ? `https://t.me/share/url?url=${encodeURIComponent(shareLink)}&text=${encodeURIComponent(shareText)}`
+    : '';
 
   const peerLeft = status === 'peer-left';
   const reconnecting = status === 'reconnecting';
@@ -417,8 +414,7 @@ function App() {
       )}
 
       {screen === 'call' && (
-        <main className="call">
-          <div className={`stage-wrap ${glow && hasRemote ? 'glow-on' : ''}`}>
+        <main className={`call ${glow && hasRemote ? 'glow-on' : ''}`}>
           <video
             ref={glowVideoRef}
             className="stage-glow"
@@ -427,151 +423,139 @@ function App() {
             muted
             aria-hidden="true"
           />
-          <div className="video-stage">
-            <video
-              ref={remoteVideoRef}
-              className="remote-video"
-              autoPlay
-              playsInline
-            />
+          <video
+            ref={remoteVideoRef}
+            className="remote-video"
+            autoPlay
+            playsInline
+          />
 
+          <div className="call-top">
             {hasRemote && status === 'in-call' && (
               <div className="stage-pill">
                 <span className="live-dot" />
                 {formatDuration(duration)}
               </div>
             )}
-
-            {reconnecting && hasRemote && (
-              <div className="stage-banner">
-                <span className="spinner sm" />
-                Связь прерывается — восстанавливаем…
-              </div>
-            )}
-
-            {cameraOffPlaceholder && (
-              <div className="overlay soft">
-                <div className="avatar">
-                  <IconUser width={34} height={34} />
-                </div>
-                <p>Камера собеседника выключена</p>
-              </div>
-            )}
-
-            {peerLeft && (
-              <div className="overlay">
-                <div className="avatar">
-                  <IconUser width={34} height={34} />
-                </div>
-                <p className="overlay-title">Собеседник вышел из звонка</p>
-                <p className="overlay-sub">
-                  Ссылка ещё работает — он может вернуться.
-                </p>
-                <div className="overlay-actions">
-                  <button className="ghost" onClick={stayInCall}>
-                    Остаться
-                  </button>
-                  <button className="primary danger-fill" onClick={endCall}>
-                    Завершить
-                  </button>
-                </div>
-              </div>
-            )}
-
-            {!hasRemote && !peerLeft && (
-              <div className="overlay">
-                <div className="spinner" />
-                <p>{STATUS_LABEL[status]}</p>
-                {error && <p className="error">{error}</p>}
-              </div>
-            )}
-
-            <div className="local">
-              <video
-                ref={localVideoRef}
-                className="local-video"
-                autoPlay
-                playsInline
-                muted
-              />
-              <span className="local-tag">
-                {!micOn && <IconMicOff width={13} height={13} />}
-                Вы
-              </span>
-              {!camOn && (
-                <div className="local-camoff">
-                  <IconVideoOff width={20} height={20} />
-                </div>
+            <button
+              className={`sec-chip ${badge.cls}`}
+              onClick={() => setSecurityOpen(true)}
+              title="Подробнее о защите звонка"
+              aria-label={`${badge.label}. Подробнее о защите звонка`}
+            >
+              <IconShield width={16} height={16} />
+              <span className="sec-chip-label">{badge.label}</span>
+              {hasRemote && status === 'in-call' && (
+                <QualityBars level={quality} />
               )}
-            </div>
-          </div>
+            </button>
           </div>
 
-          {!hasRemote && room && !peerLeft && (
-            <div className="invite">
-              <p className="invite-label">
-                <IconLink width={16} height={16} />
-                Поделитесь ссылкой с собеседником
+          {reconnecting && hasRemote && (
+            <div className="stage-banner">
+              <span className="spinner sm" />
+              Связь прерывается — восстанавливаем…
+            </div>
+          )}
+
+          {cameraOffPlaceholder && (
+            <div className="overlay soft">
+              <div className="avatar">
+                <IconUser width={34} height={34} />
+              </div>
+              <p>Камера собеседника выключена</p>
+            </div>
+          )}
+
+          {peerLeft && (
+            <div className="overlay">
+              <div className="avatar">
+                <IconUser width={34} height={34} />
+              </div>
+              <p className="overlay-title">Собеседник вышел из звонка</p>
+              <p className="overlay-sub">
+                Ссылка ещё работает — он может вернуться.
               </p>
-              <code className="room-code">{encodeRoomCode(room)}</code>
-              <div className="invite-actions">
-                <button className="copy" onClick={copyCode}>
-                  {copied ? (
-                    <>
-                      <IconCheck width={17} height={17} /> Скопировано
-                    </>
-                  ) : (
-                    <>
-                      <IconCopy width={17} height={17} /> Копировать ссылку
-                    </>
-                  )}
+              <div className="overlay-actions">
+                <button className="ghost" onClick={stayInCall}>
+                  Остаться
                 </button>
-                <button
-                  className="share wa"
-                  onClick={() => shareVia('whatsapp')}
-                  title="Отправить в WhatsApp"
-                  aria-label="Отправить ссылку в WhatsApp"
-                >
-                  <IconWhatsApp width={18} height={18} />
-                </button>
-                <button
-                  className="share tg"
-                  onClick={() => shareVia('telegram')}
-                  title="Отправить в Telegram"
-                  aria-label="Отправить ссылку в Telegram"
-                >
-                  <IconTelegram width={18} height={18} />
+                <button className="primary danger-fill" onClick={endCall}>
+                  Завершить
                 </button>
               </div>
             </div>
           )}
 
-          <div className="status-strip">
-            <button
-              className={`badge ${badge.cls}`}
-              onClick={() => setSecurityOpen(true)}
-              title="Подробнее о защите звонка"
-              aria-label="Подробнее о защите звонка"
-            >
-              <IconShield className="badge-icon" width={16} height={16} />
-              {badge.label}
-              <IconChevron className="badge-more" width={15} height={15} />
-            </button>
-            <div className="status-right">
-              {hasRemote && status === 'in-call' && (
-                <QualityBars level={quality} />
-              )}
-              {safety && (
-                <button
-                  className="safety"
-                  onClick={() => setSecurityOpen(true)}
-                  title="Назовите эти числа друг другу. Совпали — значит, на линии только вы двое."
-                >
-                  <span className="safety-label">Код безопасности</span>{' '}
-                  <strong>{safety}</strong>
-                </button>
-              )}
+          {!hasRemote && !peerLeft && (
+            <div className="overlay">
+              <div className="wait-card">
+                <div className="spinner" />
+                <p className="wait-status">{STATUS_LABEL[status]}</p>
+                {room && (
+                  <>
+                    <p className="invite-label">
+                      <IconLink width={16} height={16} />
+                      Поделитесь ссылкой с собеседником
+                    </p>
+                    <code className="room-code">{encodeRoomCode(room)}</code>
+                    <div className="invite-actions">
+                      <button className="copy" onClick={copyCode}>
+                        {copied ? (
+                          <>
+                            <IconCheck width={17} height={17} /> Скопировано
+                          </>
+                        ) : (
+                          <>
+                            <IconCopy width={17} height={17} /> Копировать ссылку
+                          </>
+                        )}
+                      </button>
+                      <a
+                        className="share wa"
+                        href={whatsappHref}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        title="Отправить в WhatsApp"
+                        aria-label="Отправить ссылку в WhatsApp"
+                      >
+                        <IconWhatsApp width={18} height={18} />
+                      </a>
+                      <a
+                        className="share tg"
+                        href={telegramHref}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        title="Отправить в Telegram"
+                        aria-label="Отправить ссылку в Telegram"
+                      >
+                        <IconTelegram width={18} height={18} />
+                      </a>
+                    </div>
+                  </>
+                )}
+                {error && <p className="error">{error}</p>}
+              </div>
             </div>
+          )}
+
+          <div className="local">
+            <video
+              ref={localVideoRef}
+              className="local-video"
+              autoPlay
+              playsInline
+              muted
+            />
+            <span className="local-tag">
+              {!micOn && <IconMicOff width={13} height={13} />}
+              Вы
+            </span>
+            {!camOn && (
+              <div className="local-camoff">
+                <IconVideoOff width={20} height={20} />
+              </div>
+            )}
           </div>
 
           <div className="controls">

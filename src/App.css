@@ -149,46 +149,120 @@ button:active {
   margin: 0;
 }
 
-/* Call screen */
+/* Call screen — full-bleed, FaceTime style */
 .call {
-  margin: auto;
-  width: min(940px, 96vw);
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
-  padding-bottom: 26px;
-}
-
-.video-stage {
-  position: relative;
-  width: 100%;
-  aspect-ratio: 16 / 9;
-  background: #04050a;
-  border-radius: 20px;
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100dvh;
+  margin: 0;
+  padding: 0;
+  background: #000;
   overflow: hidden;
-  border: 1px solid var(--border);
-  box-shadow: var(--shadow);
+  z-index: 20;
 }
 
 .remote-video {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  background: transparent;
+  z-index: 1;
+}
+
+/* Ambient backlight fills the area around a contained video */
+.stage-glow {
+  position: absolute;
+  inset: 0;
   width: 100%;
   height: 100%;
   object-fit: cover;
-  background: #04050a;
+  z-index: 0;
+  filter: blur(70px) saturate(1.8) brightness(0.85);
+  transform: scale(1.18);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.6s ease;
+}
+
+.call.glow-on .stage-glow {
+  opacity: 0.9;
+}
+
+/* Floating top bar */
+.call-top {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 18px;
+  z-index: 6;
+  pointer-events: none;
+}
+
+.call-top > * {
+  pointer-events: auto;
+}
+
+.call-top .stage-pill {
+  position: static;
+}
+
+.sec-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  margin-left: auto;
+  padding: 8px 14px;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 550;
+  color: #fff;
+  background: rgba(10, 11, 15, 0.5);
+  border: 1px solid var(--border-strong);
+  backdrop-filter: blur(16px);
+}
+
+.sec-chip:hover {
+  background: rgba(20, 22, 30, 0.62);
+  border-color: rgba(255, 255, 255, 0.22);
+}
+
+.sec-chip.ok svg:first-child {
+  color: var(--ok);
+}
+.sec-chip.warn svg:first-child {
+  color: var(--warn);
+}
+.sec-chip.pending svg:first-child {
+  color: var(--muted-2);
+  animation: pulse 1.2s ease-in-out infinite;
+}
+
+.sec-chip .quality {
+  margin-left: 2px;
 }
 
 .local {
   position: absolute;
-  right: 16px;
-  bottom: 16px;
-  width: 26%;
-  max-width: 210px;
-  aspect-ratio: 16 / 9;
-  border-radius: 12px;
+  right: 18px;
+  bottom: 108px;
+  width: 22%;
+  max-width: 190px;
+  min-width: 116px;
+  aspect-ratio: 3 / 4;
+  border-radius: 16px;
   overflow: hidden;
   border: 1px solid rgba(255, 255, 255, 0.22);
   background: #04050a;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.55);
+  z-index: 5;
 }
 
 .local-video {
@@ -253,9 +327,10 @@ button:active {
 
 .stage-banner {
   position: absolute;
-  top: 14px;
+  top: 74px;
   left: 50%;
   transform: translateX(-50%);
+  z-index: 6;
   display: inline-flex;
   align-items: center;
   gap: 9px;
@@ -279,10 +354,6 @@ button:active {
   color: var(--muted);
   background: var(--surface-3);
   border: 1px solid var(--border-strong);
-}
-
-.overlay.soft {
-  background: var(--surface);
 }
 
 .overlay-title {
@@ -326,6 +397,7 @@ button:active {
 .overlay {
   position: absolute;
   inset: 0;
+  z-index: 4;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -334,6 +406,42 @@ button:active {
   color: var(--muted);
   text-align: center;
   padding: 20px;
+  background: rgba(4, 5, 10, 0.5);
+  backdrop-filter: blur(3px);
+}
+
+.overlay.soft {
+  background: var(--surface);
+  backdrop-filter: none;
+}
+
+/* Waiting / invite card floating over the stage */
+.wait-card {
+  width: min(380px, 92vw);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  padding: 26px;
+  border-radius: 20px;
+  background: linear-gradient(180deg, var(--surface-2), var(--surface));
+  border: 1px solid var(--border-strong);
+  box-shadow: var(--shadow);
+}
+
+.wait-status {
+  margin: 0;
+  color: var(--text);
+  font-size: 15px;
+  font-weight: 550;
+}
+
+.wait-card .invite-label {
+  margin-top: 4px;
+}
+
+.wait-card .room-code {
+  text-align: left;
 }
 
 .spinner {
@@ -516,11 +624,22 @@ button:active {
   font-weight: 600;
 }
 
-/* Controls */
+/* Controls — floating glass pill over the video */
 .controls {
+  position: absolute;
+  left: 50%;
+  bottom: 26px;
+  transform: translateX(-50%);
+  z-index: 6;
   display: flex;
-  gap: 14px;
+  gap: 12px;
   justify-content: center;
+  padding: 10px;
+  border-radius: 999px;
+  background: rgba(10, 11, 15, 0.5);
+  border: 1px solid var(--border-strong);
+  backdrop-filter: blur(18px);
+  box-shadow: 0 10px 34px rgba(0, 0, 0, 0.45);
 }
 
 .ctrl {
@@ -557,31 +676,6 @@ button:active {
   color: var(--accent-hover);
 }
 
-/* Ambient backlight (ambilight) behind the main stage */
-.stage-wrap {
-  position: relative;
-  isolation: isolate;
-}
-
-.stage-glow {
-  position: absolute;
-  inset: -7%;
-  width: 114%;
-  height: 114%;
-  object-fit: cover;
-  z-index: -1;
-  border-radius: 40px;
-  filter: blur(48px) saturate(1.7);
-  transform: scale(1.05);
-  opacity: 0;
-  pointer-events: none;
-  transition: opacity 0.5s ease;
-}
-
-.stage-wrap.glow-on .stage-glow {
-  opacity: 0.6;
-}
-
 /* Invite share row */
 .invite-actions {
   display: flex;
@@ -605,6 +699,9 @@ button:active {
   align-items: center;
   justify-content: center;
   color: #fff;
+  text-decoration: none;
+  border-radius: 11px;
+  transition: background 0.15s ease;
 }
 
 .share.wa {
