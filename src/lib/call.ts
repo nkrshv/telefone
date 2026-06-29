@@ -5,7 +5,8 @@ import {
   createEncryptTransform,
   createIdentityTransform,
   deriveMediaKey,
-  isInsertableStreamsSupported,
+  supportsEncodedStreams,
+  supportsScriptTransform,
 } from './crypto';
 import { generatePeerId, type RoomCode } from './roomcode';
 
@@ -86,8 +87,15 @@ export class CallManager {
   private data: DataConnection | null = null;
   private localStream: MediaStream | null = null;
   private mediaKey: CryptoKey | null = null;
-  /** Whether THIS browser can do frame-level encryption (Insertable Streams). */
-  private readonly localSupport: boolean = isInsertableStreamsSupported();
+  /** Chrome path: createEncodedStreams() on the main thread. */
+  private readonly canEncodedStreams: boolean = supportsEncodedStreams();
+  /** Safari path: RTCRtpScriptTransform driven by a worker. */
+  private readonly canScriptTransform: boolean = supportsScriptTransform();
+  /** Whether THIS browser can do frame-level encryption in either flavour. */
+  private readonly localSupport: boolean =
+    this.canEncodedStreams || this.canScriptTransform;
+  /** Lazily-created worker that runs the Safari encoded-transform. */
+  private transformWorker: Worker | null = null;
   /** Negotiated result: extra E2EE layer is used only if BOTH peers support it. */
   private useE2EE = false;
   private negotiated = false;
@@ -121,9 +129,11 @@ export class CallManager {
       cb.onLocalStream(this.localStream);
 
       const config: RTCConfiguration = { iceServers: ICE_SERVERS };
-      // Enable the API when locally capable; transforms are still only applied
-      // if the negotiation below decides both peers support it.
-      if (this.localSupport) config.encodedInsertableStreams = true;
+      // Chrome requires the connection to opt into insertable streams; transforms
+      // are still only applied if the negotiation below decides both peers
+      // support it. Safari needs no connection-level flag (it attaches a
+      // per-sender/receiver RTCRtpScriptTransform instead).
+      if (this.canEncodedStreams) config.encodedInsertableStreams = true;
 
       // Host keeps the shared peer id; guest gets a throwaway id.
       const peerId = role === 'host' ? room.peerId : generatePeerId();
@@ -341,41 +351,57 @@ export class CallManager {
     return 4;
   }
 
-  // When Insertable Streams is enabled on the peer connection (this browser
-  // supports it), every sender/receiver MUST consume its encoded streams or
-  // Chrome blocks the media. We encrypt/decrypt when the E2EE layer was
-  // negotiated, otherwise we forward frames unchanged (DTLS-SRTP fallback).
+  private getTransformWorker(): Worker {
+    if (!this.transformWorker) {
+      this.transformWorker = new Worker(
+        new URL('./transform.worker.ts', import.meta.url),
+        { type: 'module' },
+      );
+    }
+    return this.transformWorker;
+  }
+
+  // Attach the encrypt/decrypt transform. Chrome path: createEncodedStreams()
+  // must consume every encoded stream or media is blocked, so when the E2EE
+  // layer is off we still pipe an identity transform. Safari path: we only set
+  // an RTCRtpScriptTransform when E2EE is on; otherwise media flows untouched
+  // (DTLS-SRTP fallback).
   private applySenderTransform(pc: RTCPeerConnection): void {
     if (!this.localSupport) return;
     for (const sender of pc.getSenders()) {
-      if (
-        !sender.track ||
-        !sender.createEncodedStreams ||
-        this.appliedSenders.has(sender)
-      ) {
-        continue;
+      if (!sender.track || this.appliedSenders.has(sender)) continue;
+      if (this.canEncodedStreams && sender.createEncodedStreams) {
+        const { readable, writable } = sender.createEncodedStreams();
+        const transform =
+          this.useE2EE && this.mediaKey
+            ? createEncryptTransform(this.mediaKey)
+            : createIdentityTransform();
+        void readable.pipeThrough(transform).pipeTo(writable);
+      } else if (this.canScriptTransform && this.useE2EE && this.mediaKey) {
+        sender.transform = new RTCRtpScriptTransform(this.getTransformWorker(), {
+          operation: 'encrypt',
+          key: this.mediaKey,
+        });
       }
-      const { readable, writable } = sender.createEncodedStreams();
-      const transform =
-        this.useE2EE && this.mediaKey
-          ? createEncryptTransform(this.mediaKey)
-          : createIdentityTransform();
-      void readable.pipeThrough(transform).pipeTo(writable);
       this.appliedSenders.add(sender);
     }
   }
 
   private applyReceiverTransform(receiver: RTCRtpReceiver): void {
-    if (!this.localSupport) return;
-    if (!receiver.createEncodedStreams || this.appliedReceivers.has(receiver)) {
-      return;
+    if (!this.localSupport || this.appliedReceivers.has(receiver)) return;
+    if (this.canEncodedStreams && receiver.createEncodedStreams) {
+      const { readable, writable } = receiver.createEncodedStreams();
+      const transform =
+        this.useE2EE && this.mediaKey
+          ? createDecryptTransform(this.mediaKey)
+          : createIdentityTransform();
+      void readable.pipeThrough(transform).pipeTo(writable);
+    } else if (this.canScriptTransform && this.useE2EE && this.mediaKey) {
+      receiver.transform = new RTCRtpScriptTransform(this.getTransformWorker(), {
+        operation: 'decrypt',
+        key: this.mediaKey,
+      });
     }
-    const { readable, writable } = receiver.createEncodedStreams();
-    const transform =
-      this.useE2EE && this.mediaKey
-        ? createDecryptTransform(this.mediaKey)
-        : createIdentityTransform();
-    void readable.pipeThrough(transform).pipeTo(writable);
     this.appliedReceivers.add(receiver);
   }
 
@@ -415,6 +441,8 @@ export class CallManager {
     this.localStream = null;
     this.peer?.destroy();
     this.peer = null;
+    this.transformWorker?.terminate();
+    this.transformWorker = null;
   }
 
   private describeError(type: string, fallback: string): string {
